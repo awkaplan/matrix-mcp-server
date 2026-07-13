@@ -6,6 +6,7 @@ import {
   processMessage,
   processMessagesByDate,
   countMessagesByUser,
+  ProcessedMessage,
 } from "./matrix/messageProcessor.js";
 import { TokenExchangeConfig } from "./auth/tokenExchange.js";
 import { NotificationCountType } from "matrix-js-sdk";
@@ -313,9 +314,14 @@ server.registerTool(
   {
     title: "Get Matrix Messages by Date Range",
     description:
-      "Retrieve messages from a Matrix room within a specific date range",
+      "Retrieve messages within a specific date range from a specific Matrix room, or across all joined rooms and DMs if roomId is omitted",
     inputSchema: {
-      roomId: z.string().describe("Matrix room ID (e.g., !roomid:domain.com)"),
+      roomId: z
+        .string()
+        .optional()
+        .describe(
+          "Matrix room ID (e.g., !roomid:domain.com). Omit to search across every joined room and DM"
+        ),
       startDate: z
         .string()
         .describe("Start date in ISO 8601 format (e.g., 2024-01-01T00:00:00Z)"),
@@ -335,40 +341,103 @@ server.registerTool(
         matrixUserId,
         accessToken
       );
-      const room = client.getRoom(roomId);
-      if (!room) {
+
+      // Single room: same behavior as before
+      if (roomId) {
+        const room = client.getRoom(roomId);
+        if (!room) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: Room with ID ${roomId} not found. You may not be a member of this room.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const events = room.getLiveTimeline().getEvents();
+        const messages = await processMessagesByDate(
+          events,
+          startDate,
+          endDate,
+          client
+        );
+
+        return {
+          content:
+            messages.length > 0
+              ? messages
+              : [
+                  {
+                    type: "text",
+                    text: `No messages found in room ${
+                      room.name || roomId
+                    } between ${startDate} and ${endDate}`,
+                  },
+                ],
+        };
+      }
+
+      // No roomId: search every joined room and DM (DMs are just 2-member rooms)
+      const rooms = client.getRooms();
+      const resultsByRoom = await Promise.all(
+        rooms.map(async (room) => {
+          const events = room.getLiveTimeline().getEvents();
+          const messages = await processMessagesByDate(
+            events,
+            startDate,
+            endDate,
+            client
+          );
+          return { room, messages };
+        })
+      );
+
+      const roomsWithMessages = resultsByRoom.filter(
+        ({ messages }) => messages.length > 0
+      );
+
+      if (roomsWithMessages.length === 0) {
         return {
           content: [
             {
               type: "text",
-              text: `Error: Room with ID ${roomId} not found. You may not be a member of this room.`,
+              text: `No messages found across ${rooms.length} joined room(s) between ${startDate} and ${endDate}`,
             },
           ],
-          isError: true,
         };
       }
 
-      const events = room.getLiveTimeline().getEvents();
-      const messages = await processMessagesByDate(
-        events,
-        startDate,
-        endDate,
-        client
+      const totalMessages = roomsWithMessages.reduce(
+        (sum, { messages }) => sum + messages.length,
+        0
       );
 
-      return {
-        content:
-          messages.length > 0
-            ? messages
-            : [
-                {
-                  type: "text",
-                  text: `No messages found in room ${
-                    room.name || roomId
-                  } between ${startDate} and ${endDate}`,
-                },
-              ],
-      };
+      const content: ProcessedMessage[] = [
+        {
+          type: "text",
+          text: `Found ${totalMessages} message${
+            totalMessages === 1 ? "" : "s"
+          } across ${roomsWithMessages.length} room(s) between ${startDate} and ${endDate}:`,
+        },
+      ];
+
+      for (const { room, messages } of roomsWithMessages) {
+        const isDm =
+          room.getMyMembership() === "join" &&
+          room.getJoinedMemberCount() === 2;
+        content.push({
+          type: "text",
+          text: `--- ${room.name || "Unnamed Room"} (${room.roomId})${
+            isDm ? " [DM]" : ""
+          } ---`,
+        });
+        content.push(...messages);
+      }
+
+      return { content };
     } catch (error: any) {
       console.error(`Failed to filter messages by date: ${error.message}`);
       removeClientFromCache(matrixUserId, homeserverUrl);
