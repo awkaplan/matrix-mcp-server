@@ -149,7 +149,7 @@ if (ENABLE_HTTPS) {
     const credentials = { key: privateKey, cert: certificate };
 
     const httpsServer = https.createServer(credentials, app);
-    httpsServer.listen(PORT, "127.0.0.1", () => {
+    httpsServer.listen(PORT, process.env.HOST || "0.0.0.0", () => {
       console.log(`MCP HTTPS Server listening on port ${PORT}`);
       console.log(`MCP endpoint: https://localhost:${PORT}/mcp`);
     });
@@ -177,7 +177,7 @@ if (ENABLE_HTTPS) {
     process.exit(1);
   }
 } else {
-  const server = app.listen(PORT, "127.0.0.1", () => {
+  const server = app.listen(PORT, process.env.HOST || "0.0.0.0", () => {
     console.log(`MCP HTTP Server listening on port ${PORT}`);
     console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   });
