@@ -1,5 +1,6 @@
 import * as sdk from "matrix-js-sdk";
 import { MatrixClient, ClientEvent } from "matrix-js-sdk";
+import { decodeRecoveryKey } from "matrix-js-sdk/lib/crypto-api/recovery-key.js";
 import https from "https";
 import fetch from "node-fetch";
 import { exchangeToken, TokenExchangeConfig } from "../auth/tokenExchange.js";
@@ -15,6 +16,14 @@ export interface MatrixClientConfig {
   enableOAuth: boolean;
   tokenExchangeConfig?: TokenExchangeConfig;
   enableTokenExchange: boolean;
+  /**
+   * Account's Secure Backup recovery key (the "EsUx ...." string), used to
+   * restore server-side key backup so this ephemeral device can decrypt
+   * encrypted-room history from before it existed. Optional -- without it,
+   * crypto still initializes and can decrypt anything shared going forward,
+   * but historical messages in encrypted rooms stay opaque.
+   */
+  recoveryKey?: string;
 }
 
 /**
@@ -33,6 +42,7 @@ export async function createMatrixClient(
     enableOAuth,
     tokenExchangeConfig,
     enableTokenExchange,
+    recoveryKey,
   } = config;
 
   if (!homeserverUrl) {
@@ -83,11 +93,76 @@ export async function createMatrixClient(
         token: matrixAccessToken,
       });
       client.setAccessToken(matrixLoginResponse.access_token);
+      // loginRequest() hands back the device_id assigned to this session --
+      // rust-crypto below requires it to already be set on the client.
+      client.deviceId = matrixLoginResponse.device_id ?? null;
     } else if (matrixAccessToken) {
       // Non-OAuth mode: use provided Matrix access token directly
       client.setAccessToken(matrixAccessToken);
+      // Direct-token mode never runs a real login, so the SDK has no way to
+      // know its own device_id -- ask the homeserver. Needed because
+      // rust-crypto keys everything (Olm/Megolm sessions, key backup)
+      // per-device and refuses to initialize without one.
+      try {
+        const whoami = await client.whoami();
+        client.deviceId = whoami.device_id ?? null;
+      } catch (error: any) {
+        console.warn(
+          `Could not determine device ID via whoami(); encrypted rooms will not decrypt: ${error.message}`
+        );
+      }
     } else {
       throw new Error("No valid access token available for Matrix client.");
+    }
+
+    // End-to-end encryption: without this, every event in an encrypted room
+    // stays typed m.room.encrypted and is invisible to the message-reading
+    // tools. Must run before startClient() so incoming/historical events get
+    // decrypted as the timeline is populated during the initial sync.
+    if (client.getDeviceId()) {
+      try {
+        // In-memory crypto store (no IndexedDB in Node) -- scoped to this
+        // cached client's process lifetime (see clientCache.ts's 15-minute
+        // idle TTL), rebuilt via key backup restore below on each cold start
+        // rather than persisted to disk.
+        await client.initRustCrypto({ useIndexedDB: false });
+
+        if (recoveryKey) {
+          const crypto = client.getCrypto();
+          if (crypto) {
+            try {
+              const backupInfo = await crypto.getKeyBackupInfo();
+              if (backupInfo?.version) {
+                const privateKey = decodeRecoveryKey(recoveryKey);
+                await crypto.storeSessionBackupPrivateKey(
+                  privateKey,
+                  backupInfo.version
+                );
+                const result = await crypto.restoreKeyBackup();
+                console.log(
+                  `Restored ${result.imported}/${result.total} keys from server-side key backup`
+                );
+              } else {
+                console.warn(
+                  "No server-side key backup found; encrypted messages sent before this device existed will not decrypt"
+                );
+              }
+            } catch (error: any) {
+              console.warn(
+                `Key backup restore failed; encrypted messages may not decrypt: ${error.message}`
+              );
+            }
+          }
+        }
+      } catch (error: any) {
+        console.warn(
+          `Failed to initialize end-to-end encryption; encrypted messages will not decrypt: ${error.message}`
+        );
+      }
+    } else {
+      console.warn(
+        "No device ID available; encrypted rooms will not decrypt"
+      );
     }
 
     await client.startClient({ initialSyncLimit: 100 });

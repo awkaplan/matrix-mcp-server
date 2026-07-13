@@ -6,6 +6,7 @@ import {
   processMessage,
   processMessagesByDate,
   countMessagesByUser,
+  waitForDecryption,
   ProcessedMessage,
 } from "./matrix/messageProcessor.js";
 import { TokenExchangeConfig } from "./auth/tokenExchange.js";
@@ -16,6 +17,7 @@ const ENABLE_OAUTH = process.env.ENABLE_OAUTH === "true";
 const ENABLE_TOKEN_EXCHANGE = process.env.ENABLE_TOKEN_EXCHANGE === "true";
 const defaultHomeserverUrl =
   process.env.MATRIX_HOMESERVER_URL || "https://localhost:8008/";
+const defaultRecoveryKey = process.env.MATRIX_RECOVERY_KEY || "";
 
 // OAuth/Token exchange configuration
 const tokenExchangeConfig: TokenExchangeConfig = {
@@ -93,12 +95,26 @@ function getMatrixContext(
 }
 
 /**
+ * Helper function to get the Secure Backup recovery key used to restore
+ * encrypted-room history predating this device. Header takes priority over
+ * the MATRIX_RECOVERY_KEY env var default.
+ */
+function getRecoveryKey(
+  headers: Record<string, string | string[] | undefined> | undefined
+): string | undefined {
+  const fromHeader = headers?.["matrix_recovery_key"];
+  const value = Array.isArray(fromHeader) ? fromHeader[0] : fromHeader;
+  return value || defaultRecoveryKey || undefined;
+}
+
+/**
  * Helper function to create Matrix client with proper configuration
  */
 async function createConfiguredMatrixClient(
   homeserverUrl: string,
   matrixUserId: string,
-  accessToken: string
+  accessToken: string,
+  headers?: Record<string, string | string[] | undefined>
 ) {
   return createMatrixClient({
     homeserverUrl,
@@ -107,6 +123,7 @@ async function createConfiguredMatrixClient(
     enableOAuth: ENABLE_OAUTH,
     tokenExchangeConfig: tokenExchangeConfig,
     enableTokenExchange: ENABLE_TOKEN_EXCHANGE,
+    recoveryKey: getRecoveryKey(headers),
   });
 }
 
@@ -129,7 +146,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
 
       const rooms = client.getRooms();
@@ -183,7 +201,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
 
       const room = client.getRoom(roomId);
@@ -199,12 +218,11 @@ server.registerTool(
         };
       }
 
+      const recentEvents = room.getLiveTimeline().getEvents().slice(-limit);
+      await waitForDecryption(recentEvents);
+
       const messages = await Promise.all(
-        room
-          .getLiveTimeline()
-          .getEvents()
-          .slice(-limit)
-          .map((event) => processMessage(event, client))
+        recentEvents.map((event) => processMessage(event, client))
       );
 
       const validMessages = messages.filter((message) => message !== null);
@@ -257,7 +275,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
 
       const room = client.getRoom(roomId);
@@ -339,7 +358,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
 
       // Single room: same behavior as before
@@ -358,6 +378,7 @@ server.registerTool(
         }
 
         const events = room.getLiveTimeline().getEvents();
+        await waitForDecryption(events);
         const messages = await processMessagesByDate(
           events,
           startDate,
@@ -385,6 +406,7 @@ server.registerTool(
       const resultsByRoom = await Promise.all(
         rooms.map(async (room) => {
           const events = room.getLiveTimeline().getEvents();
+          await waitForDecryption(events);
           const messages = await processMessagesByDate(
             events,
             startDate,
@@ -478,7 +500,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const room = client.getRoom(roomId);
       if (!room) {
@@ -494,6 +517,7 @@ server.registerTool(
       }
 
       const events = room.getLiveTimeline().getEvents();
+      await waitForDecryption(events);
       const activeUsers = countMessagesByUser(events, limit);
 
       return {
@@ -546,7 +570,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const users = client.getUsers();
       return {
@@ -599,7 +624,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const room = client.getRoom(roomId);
       if (!room) {
@@ -686,7 +712,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const user = client.getUser(targetUserId);
       if (!user) {
@@ -766,7 +793,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const user = client.getUser(matrixUserId);
       if (!user) {
@@ -876,7 +904,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const searchOptions: any = {
         limit,
@@ -975,7 +1004,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const rooms = client.getRooms();
       let filteredRooms = rooms;
@@ -1096,7 +1126,8 @@ server.registerTool(
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
         matrixUserId,
-        accessToken
+        accessToken,
+        requestInfo?.headers
       );
       const rooms = client.getRooms();
 

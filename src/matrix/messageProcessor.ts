@@ -62,6 +62,35 @@ export async function processMessage(
 }
 
 /**
+ * Waits for any still-encrypting events in a batch to finish decrypting.
+ *
+ * Decryption (including from a just-restored key backup) happens
+ * asynchronously in the background crypto engine and isn't guaranteed to be
+ * done by the time the initial sync's "PREPARED" event fires -- reading
+ * event.getType() immediately after sync can race with it, intermittently
+ * missing messages that are perfectly decryptable a moment later. Polls
+ * rather than relying solely on MatrixEvent's decryption promise, since an
+ * event whose decryption hasn't been kicked off yet exposes no promise to
+ * await.
+ *
+ * @param events - Array of Matrix events that may still be decrypting
+ * @param timeoutMs - Maximum time to wait before giving up (default: 5000ms)
+ */
+export async function waitForDecryption(
+  events: sdk.MatrixEvent[],
+  timeoutMs: number = 5000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const stillEncrypted = events.some(
+      (event) => event.getType() === EventType.RoomMessageEncrypted
+    );
+    if (!stillEncrypted) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/**
  * Filters and processes messages within a date range
  * 
  * @param events - Array of Matrix events
