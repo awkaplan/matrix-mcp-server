@@ -1247,11 +1247,13 @@ server.registerTool(
   {
     title: "Start Matrix Device Verification",
     description:
-      "Starts interactive emoji (SAS) verification of this server's Matrix device with your other devices. " +
-      "Sends a verification request to your other signed-in Matrix clients (e.g. Element or Cinny) -- accept it there " +
-      "and choose to compare emoji. Returns the emoji sequence to compare; call confirm-device-verification once " +
-      "you've checked they match on both sides. Verifying lets this device decrypt encrypted-room history via your " +
-      "account's key backup, without needing to supply a recovery key.",
+      "Starts (or resumes) interactive emoji (SAS) verification of this server's Matrix device with your other " +
+      "devices. Sends a verification request to your other signed-in Matrix clients (e.g. Element, Cinny, or " +
+      "FluffyChat) -- accept it there and choose to compare emoji. This call waits up to ~15 seconds for a " +
+      "response; if your other device hasn't responded yet it returns immediately saying so instead of erroring -- " +
+      "just call this tool again (as many times as needed) once you've had a chance to check your other device. " +
+      "Once emoji are returned, compare them and call confirm-device-verification. Verifying lets this device " +
+      "decrypt encrypted-room history via your account's key backup, without needing to supply a recovery key.",
     inputSchema: {},
   },
   async (_input, { requestInfo, authInfo }) => {
@@ -1266,16 +1268,28 @@ server.registerTool(
         accessToken,
         requestInfo?.headers
       );
-      const { emoji } = await startDeviceVerification(
+      const { emoji, waiting } = await startDeviceVerification(
         client,
         matrixUserId,
         homeserverUrl
       );
+
+      if (waiting) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Verification request sent -- no response from your other device yet. Check it for an incoming verification prompt (it may take a few seconds to arrive), accept it, then call start-device-verification again.",
+            },
+          ],
+        };
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: `Verification request sent. Accept it on your other Matrix client, choose to compare emoji, and confirm these match on both sides:\n\n${emoji}\n\nThen call confirm-device-verification with emojiMatch set to true (or false if they don't match).`,
+            text: `Compare these emoji with what your other device is showing:\n\n${emoji}\n\nThen call confirm-device-verification with emojiMatch set to true (or false if they don't match).`,
           },
         ],
       };
