@@ -5,6 +5,7 @@ import https from "https";
 import fetch from "node-fetch";
 import { exchangeToken, TokenExchangeConfig } from "../auth/tokenExchange.js";
 import { getCachedClient, cacheClient, removeCachedClient } from "./clientCache.js";
+import { watchForIncomingVerification } from "./verification.js";
 
 /**
  * Configuration for Matrix client creation
@@ -126,6 +127,13 @@ export async function createMatrixClient(
         // idle TTL), rebuilt via key backup restore below on each cold start
         // rather than persisted to disk.
         await client.initRustCrypto({ useIndexedDB: false });
+
+        // Some clients (confirmed: FluffyChat) never surface any UI for an
+        // incoming self-verification request sent via
+        // requestOwnUserVerification() -- the only reliable path with them
+        // is to accept a request THEY initiate instead. Register before
+        // startClient() so nothing arriving during the first sync is missed.
+        watchForIncomingVerification(client, userId, homeserverUrl);
 
         if (recoveryKey) {
           const crypto = client.getCrypto();

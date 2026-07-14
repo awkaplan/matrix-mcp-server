@@ -1,4 +1,5 @@
 import { MatrixClient } from "matrix-js-sdk";
+import { CryptoEvent } from "matrix-js-sdk/lib/crypto-api/CryptoEvent.js";
 import {
   VerificationRequest,
   Verifier,
@@ -92,6 +93,52 @@ function formatEmoji(sasEvent: ShowSasCallbacks): string {
   return (sasEvent.sas.emoji ?? [])
     .map(([emoji, name]) => `${emoji} (${name})`)
     .join("  ");
+}
+
+/**
+ * Auto-accepts any self-verification request initiated by one of the
+ * user's *other* devices (e.g. tapping "Verify this session" in Element,
+ * Cinny, or FluffyChat), rather than only ever supporting the direction
+ * where this device requests verification.
+ *
+ * Needed because start-device-verification alone isn't enough in practice:
+ * confirmed against a real client (FluffyChat) that never surfaced any UI
+ * for an incoming self-verification request sent via
+ * requestOwnUserVerification(), with no error and no way to retry into a
+ * working state -- some clients only expose "verify this session" as an
+ * action you take on your trusted device pointed at the new one, not as
+ * something they can receive a request for. Accepting here doesn't grant
+ * trust by itself (that still requires a human to compare emoji and call
+ * confirm-device-verification); it just gets the SAS exchange started so
+ * there's something for that human to compare.
+ *
+ * Call once per client, after crypto initializes and before startClient()
+ * so nothing arriving during the very first sync is missed.
+ */
+export function watchForIncomingVerification(
+  client: MatrixClient,
+  userId: string,
+  homeserverUrl: string
+): void {
+  const key = getCacheKey(userId, homeserverUrl);
+  client.on(CryptoEvent.VerificationRequestReceived, (request: VerificationRequest) => {
+    void (async () => {
+      const existing = pendingVerifications.get(key);
+      if (existing && (existing.verifier || existing.sasEvent)) {
+        // Already actively verifying via some other flow -- don't clobber
+        // it. (A stale/never-progressed entry is fine to replace below.)
+        return;
+      }
+      try {
+        await request.accept();
+        pendingVerifications.set(key, { request, requestedAt: Date.now() });
+      } catch (error: any) {
+        console.warn(
+          `Failed to accept incoming verification request: ${error.message}`
+        );
+      }
+    })();
+  });
 }
 
 /**
