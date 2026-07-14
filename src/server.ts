@@ -9,6 +9,10 @@ import {
   waitForDecryption,
   ProcessedMessage,
 } from "./matrix/messageProcessor.js";
+import {
+  startDeviceVerification,
+  confirmDeviceVerification,
+} from "./matrix/verification.js";
 import { TokenExchangeConfig } from "./auth/tokenExchange.js";
 import { NotificationCountType } from "matrix-js-sdk";
 
@@ -1229,6 +1233,142 @@ Mentions: ${mentionCount}`,
           {
             type: "text",
             text: `Error: Failed to get direct messages - ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: Start device verification
+server.registerTool(
+  "start-device-verification",
+  {
+    title: "Start Matrix Device Verification",
+    description:
+      "Starts interactive emoji (SAS) verification of this server's Matrix device with your other devices. " +
+      "Sends a verification request to your other signed-in Matrix clients (e.g. Element or Cinny) -- accept it there " +
+      "and choose to compare emoji. Returns the emoji sequence to compare; call confirm-device-verification once " +
+      "you've checked they match on both sides. Verifying lets this device decrypt encrypted-room history via your " +
+      "account's key backup, without needing to supply a recovery key.",
+    inputSchema: {},
+  },
+  async (_input, { requestInfo, authInfo }) => {
+    const { matrixUserId, homeserverUrl } = getMatrixContext(
+      requestInfo?.headers
+    );
+    const accessToken = getAccessToken(requestInfo?.headers, authInfo?.token);
+    try {
+      const client = await createConfiguredMatrixClient(
+        homeserverUrl,
+        matrixUserId,
+        accessToken,
+        requestInfo?.headers
+      );
+      const { emoji } = await startDeviceVerification(
+        client,
+        matrixUserId,
+        homeserverUrl
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Verification request sent. Accept it on your other Matrix client, choose to compare emoji, and confirm these match on both sides:\n\n${emoji}\n\nThen call confirm-device-verification with emojiMatch set to true (or false if they don't match).`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      console.error(`Failed to start device verification: ${error.message}`);
+      removeClientFromCache(matrixUserId, homeserverUrl);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: Failed to start device verification - ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: Confirm device verification
+server.registerTool(
+  "confirm-device-verification",
+  {
+    title: "Confirm Matrix Device Verification",
+    description:
+      "Completes a device verification started with start-device-verification, after you've compared the emoji " +
+      "shown on both devices.",
+    inputSchema: {
+      emojiMatch: z
+        .boolean()
+        .describe(
+          "true if the emoji shown here match what your other device displayed, false if they don't"
+        ),
+    },
+  },
+  async ({ emojiMatch }, { requestInfo, authInfo }) => {
+    const { matrixUserId, homeserverUrl } = getMatrixContext(
+      requestInfo?.headers
+    );
+    const accessToken = getAccessToken(requestInfo?.headers, authInfo?.token);
+    try {
+      const client = await createConfiguredMatrixClient(
+        homeserverUrl,
+        matrixUserId,
+        accessToken,
+        requestInfo?.headers
+      );
+      const result = await confirmDeviceVerification(
+        client,
+        matrixUserId,
+        homeserverUrl,
+        emojiMatch
+      );
+
+      if (!result.verified) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Verification cancelled due to emoji mismatch. If this was unexpected, start over with start-device-verification.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      let backupText: string;
+      if (result.backupStatus === "restored" && result.backupRestored) {
+        backupText = `Restored ${result.backupRestored.imported}/${result.backupRestored.total} keys from your account's key backup -- encrypted-room history should now decrypt.`;
+      } else if (result.backupStatus === "pending") {
+        backupText =
+          "Your account has a key backup, but its decryption key hadn't arrived yet -- it should finish transferring in the background over the next several minutes, at which point encrypted-room history will start decrypting on its own.";
+      } else {
+        backupText =
+          "No server-side key backup was found for your account, so encrypted history from before this device existed will still not decrypt -- only messages sent from now on will.";
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Device verified successfully. ${backupText}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      console.error(`Failed to confirm device verification: ${error.message}`);
+      removeClientFromCache(matrixUserId, homeserverUrl);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: Failed to confirm device verification - ${error.message}`,
           },
         ],
         isError: true,
