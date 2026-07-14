@@ -7,6 +7,55 @@ import { exchangeToken, TokenExchangeConfig } from "../auth/tokenExchange.js";
 import { getCachedClient, cacheClient, removeCachedClient } from "./clientCache.js";
 import { watchForIncomingVerification } from "./verification.js";
 
+export interface RecoveryKeyRestoreResult {
+  outcome: "restored" | "no-backup" | "failed";
+  imported?: number;
+  total?: number;
+  error?: string;
+}
+
+/**
+ * Restores server-side key backup using a Secure Backup recovery key.
+ * Shared between createMatrixClient() (attempts this automatically at cold
+ * start if a recovery key is configured) and the get-encryption-status
+ * tool (attempts it on demand and reports exactly what happened) --
+ * factored out because the only way to previously observe the outcome of
+ * this was console.log/warn output buried in server logs, which turned
+ * out to be impractical to actually read back: this account generates
+ * thousands of log lines per cold client creation from historical
+ * decrypt-failure spam alone, easily exceeding docker log tooling's tail
+ * limits before reaching the lines that would show whether restore
+ * actually worked.
+ */
+export async function restoreKeyBackupWithRecoveryKey(
+  crypto: NonNullable<ReturnType<MatrixClient["getCrypto"]>>,
+  recoveryKey: string
+): Promise<RecoveryKeyRestoreResult> {
+  try {
+    const backupInfo = await crypto.getKeyBackupInfo();
+    if (!backupInfo?.version) {
+      return { outcome: "no-backup" };
+    }
+    const privateKey = decodeRecoveryKey(recoveryKey);
+    await crypto.storeSessionBackupPrivateKey(privateKey, backupInfo.version);
+    // Establishes trust for the backup (our locally-stored key now matches
+    // it) and activates the SDK's per-session downloader's retry path --
+    // without this, restoreKeyBackup() below still reports success with
+    // the right imported/total counts, but any event whose decryption was
+    // already attempted-and-failed before the key became available (the
+    // common case for this function's second caller: a client that was
+    // already cached and synced before a recovery key was ever supplied)
+    // never actually gets re-decrypted. Confirmed experimentally: the
+    // identical restore sequence without this call reports success but
+    // the message stays permanently stuck as "Unable to decrypt".
+    await crypto.checkKeyBackupAndEnable();
+    const result = await crypto.restoreKeyBackup();
+    return { outcome: "restored", imported: result.imported, total: result.total };
+  } catch (error: any) {
+    return { outcome: "failed", error: error.message };
+  }
+}
+
 /**
  * Configuration for Matrix client creation
  */
@@ -138,26 +187,21 @@ export async function createMatrixClient(
         if (recoveryKey) {
           const crypto = client.getCrypto();
           if (crypto) {
-            try {
-              const backupInfo = await crypto.getKeyBackupInfo();
-              if (backupInfo?.version) {
-                const privateKey = decodeRecoveryKey(recoveryKey);
-                await crypto.storeSessionBackupPrivateKey(
-                  privateKey,
-                  backupInfo.version
-                );
-                const result = await crypto.restoreKeyBackup();
-                console.log(
-                  `Restored ${result.imported}/${result.total} keys from server-side key backup`
-                );
-              } else {
-                console.warn(
-                  "No server-side key backup found; encrypted messages sent before this device existed will not decrypt"
-                );
-              }
-            } catch (error: any) {
+            const restoreResult = await restoreKeyBackupWithRecoveryKey(
+              crypto,
+              recoveryKey
+            );
+            if (restoreResult.outcome === "restored") {
+              console.log(
+                `Restored ${restoreResult.imported}/${restoreResult.total} keys from server-side key backup`
+              );
+            } else if (restoreResult.outcome === "no-backup") {
               console.warn(
-                `Key backup restore failed; encrypted messages may not decrypt: ${error.message}`
+                "No server-side key backup found; encrypted messages sent before this device existed will not decrypt"
+              );
+            } else {
+              console.warn(
+                `Key backup restore failed; encrypted messages may not decrypt: ${restoreResult.error}`
               );
             }
           }

@@ -14,6 +14,7 @@ import {
   confirmDeviceVerification,
 } from "./matrix/verification.js";
 import { TokenExchangeConfig } from "./auth/tokenExchange.js";
+import { getEncryptionStatus } from "./matrix/status.js";
 import { NotificationCountType } from "matrix-js-sdk";
 
 // Environment configuration
@@ -1383,6 +1384,81 @@ server.registerTool(
           {
             type: "text",
             text: `Error: Failed to confirm device verification - ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: Get encryption status
+server.registerTool(
+  "get-encryption-status",
+  {
+    title: "Get Matrix Encryption Status",
+    description:
+      "Reports whether end-to-end encryption is actually working for this session: whether crypto initialized, " +
+      "whether your account has a server-side key backup, and whether this device currently has the decryption " +
+      "key loaded (the thing that determines whether encrypted-room history will decrypt). If a " +
+      "matrix_recovery_key is supplied and the key isn't loaded yet, attempts to restore it right here and " +
+      "reports exactly what happened. Use this to check why message-reading tools are returning nothing from " +
+      "encrypted rooms, instead of guessing from server logs.",
+    inputSchema: {},
+  },
+  async (_input, { requestInfo, authInfo }) => {
+    const { matrixUserId, homeserverUrl } = getMatrixContext(
+      requestInfo?.headers
+    );
+    const accessToken = getAccessToken(requestInfo?.headers, authInfo?.token);
+    try {
+      const client = await createConfiguredMatrixClient(
+        homeserverUrl,
+        matrixUserId,
+        accessToken,
+        requestInfo?.headers
+      );
+      const recoveryKey = getRecoveryKey(requestInfo?.headers);
+      const status = await getEncryptionStatus(client, recoveryKey);
+
+      const lines: string[] = [
+        `Crypto initialized: ${status.cryptoInitialized ? "yes" : "no"}`,
+        `Device ID: ${status.deviceId ?? "unknown"}`,
+        `Server-side key backup exists: ${status.backupExists ? "yes" : "no"}`,
+        `Backup decryption key currently loaded: ${status.hasBackupKeyLoaded ? "yes" : "no"}`,
+      ];
+
+      if (status.restoreAttempted) {
+        if (status.restoreOutcome === "restored") {
+          lines.push(
+            `Just restored ${status.restoreImported}/${status.restoreTotal} keys from backup using the supplied recovery key -- encrypted-room history should decrypt now.`
+          );
+        } else if (status.restoreOutcome === "failed") {
+          lines.push(
+            `Attempted to restore using the supplied recovery key, but it failed: ${status.restoreError}. Double-check the key is correct and complete (it's a space-separated string, easy to truncate when copying).`
+          );
+        }
+      } else if (status.backupExists && !status.hasBackupKeyLoaded) {
+        lines.push(
+          "No matrix_recovery_key header was supplied, so no restore was attempted."
+        );
+      } else if (!status.backupExists) {
+        lines.push(
+          "No account-level fix possible here -- set up Secure Backup in a real Matrix client first, then retry."
+        );
+      }
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+      };
+    } catch (error: any) {
+      console.error(`Failed to get encryption status: ${error.message}`);
+      removeClientFromCache(matrixUserId, homeserverUrl);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: Failed to get encryption status - ${error.message}`,
           },
         ],
         isError: true,
