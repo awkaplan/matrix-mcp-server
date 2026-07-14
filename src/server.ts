@@ -338,7 +338,10 @@ server.registerTool(
   {
     title: "Get Matrix Messages by Date Range",
     description:
-      "Retrieve messages within a specific date range from a specific Matrix room, or across all joined rooms and DMs if roomId is omitted",
+      "Retrieve messages within a specific date range from a specific Matrix room, or across all joined rooms and DMs if roomId is omitted. " +
+      "Both dates are optional -- omit them (or just endDate) to default to the last 24 hours, computed from the server's actual current " +
+      "time rather than a guess. Only pass explicit dates if the user named a specific range; don't invent a startDate/endDate for relative " +
+      "requests like 'yesterday' or 'this week' -- compute those from the current date, not from memory or a training-data example.",
     inputSchema: {
       roomId: z
         .string()
@@ -348,17 +351,36 @@ server.registerTool(
         ),
       startDate: z
         .string()
-        .describe("Start date in ISO 8601 format (e.g., 2024-01-01T00:00:00Z)"),
+        .optional()
+        .describe(
+          "Start date in ISO 8601 format (e.g., 2025-06-01T00:00:00Z). Omit to default to 24 hours before endDate/now."
+        ),
       endDate: z
         .string()
-        .describe("End date in ISO 8601 format (e.g., 2024-01-02T00:00:00Z)"),
+        .optional()
+        .describe(
+          "End date in ISO 8601 format (e.g., 2025-06-02T00:00:00Z). Omit to default to the current time."
+        ),
     },
   },
-  async ({ roomId, startDate, endDate }, { requestInfo, authInfo }) => {
+  async (
+    { roomId, startDate: startDateInput, endDate: endDateInput },
+    { requestInfo, authInfo }
+  ) => {
     const { matrixUserId, homeserverUrl } = getMatrixContext(
       requestInfo?.headers
     );
     const accessToken = getAccessToken(requestInfo?.headers, authInfo?.token);
+    // Default to the last 24 hours using the server's real clock -- a
+    // calling LLM asked for a relative range like "yesterday" has no
+    // reliable way to know today's actual date, and left to guess, will
+    // anchor on whatever date appears in its training data or in this
+    // schema's own example strings. Computing the default here instead
+    // means "yesterday"-style requests don't depend on that guess at all.
+    const endDate = endDateInput ?? new Date().toISOString();
+    const startDate =
+      startDateInput ??
+      new Date(new Date(endDate).getTime() - 24 * 60 * 60 * 1000).toISOString();
     try {
       const client = await createConfiguredMatrixClient(
         homeserverUrl,
